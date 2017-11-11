@@ -1,127 +1,239 @@
+#include "common.h"
+
+#include "camera.h"
+#include "dma.h"
+#include "memory.h"
+#include "resources.h"
+#include "sheet.h"
+#include "sprite.h"
+#include "tables.h"
+#include "vdp.h"
+#include "vdp_tile.h"
+#include "vdp_ext.h"
+
 #include "effect.h"
 
-#include <genesis.h>
-#include "tables.h"
-#include "sprite.h"
-#include "resources.h"
-#include "camera.h"
-
-#define MAX_DAMAGE_STRINGS 4
-
-#define MAX_SMOKE 8
-#define SMOKE_NONE 0
-#define SMOKE_SMALL 1
-#define SMOKE_MID 2
-#define SMOKE_BIG 3
-#define SMOKE_PLAYER 4
-
 typedef struct {
-	u8 sprite[4];
-	u8 sprite_count;
-	s16 x, y;
-	u8 ttl;
-} damage_string_def;
+	VDPSprite sprite;
+	uint8_t type, ttl;
+	int16_t x, y;
+} Effect;
 
-damage_string_def damage_string[MAX_DAMAGE_STRINGS];
+Effect effDamage[MAX_DAMAGE], effSmoke[MAX_SMOKE], effMisc[MAX_MISC];
 
-typedef struct {
-	u8 sprite;
-	s16 x, y;
-	u8 ttl;
-} smoke_def;
+// Create a memory buffer of 4 tiles containing a string like "+3" or "-127"
+// Then copy to VRAM via DMA transfer
+uint32_t dtiles[4][8];
 
-smoke_def smoke[MAX_SMOKE];
-
-// Internal functions
-void damage_string_update(damage_string_def *d);
-void damage_string_cleanup(damage_string_def *d);
-void smoke_update(smoke_def *s);
+void effects_init() {
+	for(uint8_t i = 0; i < MAX_DAMAGE; i++) effDamage[i] = (Effect){};
+	for(uint8_t i = 0; i < MAX_SMOKE; i++) effSmoke[i] = (Effect){};
+	for(uint8_t i = 0; i < MAX_MISC; i++) effMisc[i] = (Effect){};
+	// Load each frame of the small smoke sprite
+	uint32_t stiles[7][32]; // [number of frames][tiles per frame * (tile bytes / sizeof(uint32_t))]
+	for(uint8_t i = 0; i < 7; i++) {
+		memcpy(stiles[i], SPR_TILES(&SPR_Smoke, 0, i), 128);
+	}
+	// Transfer to VRAM
+	VDP_loadTileData(stiles[0], TILE_SMOKEINDEX, TILE_SMOKESIZE, TRUE);
+}
 
 void effects_clear() {
-	for(u8 i = 0; i < MAX_DAMAGE_STRINGS; i++) {
-		damage_string[i].ttl = 0;
-		damage_string_cleanup(&damage_string[i]);
-	}
-	for(u8 i = 0; i < MAX_SMOKE; i++) {
-		smoke[i].ttl = 0;
-		sprite_delete(smoke[i].sprite);
-	}
+	for(uint8_t i = 0; i < MAX_DAMAGE; i++) effDamage[i].ttl = 0;
+	for(uint8_t i = 0; i < MAX_MISC; i++) effMisc[i].ttl = 0;
+	effects_clear_smoke();
+}
+
+void effects_clear_smoke() {
+	for(uint8_t i = 0; i < MAX_SMOKE; i++) effSmoke[i].ttl = 0;
 }
 
 void effects_update() {
-	for(u8 i = 0; i < MAX_DAMAGE_STRINGS; i++) {
-		if(damage_string[i].ttl == 0) continue;
-		damage_string[i].ttl--;
-		if(damage_string[i].ttl == 0) {
-			damage_string_cleanup(&damage_string[i]);
-		} else {
-			damage_string_update(&damage_string[i]);
-		}
+	for(uint8_t i = 0; i < MAX_DAMAGE; i++) {
+		if(!effDamage[i].ttl) continue;
+		effDamage[i].ttl--;
+		effDamage[i].y -= effDamage[i].ttl & 1;
+		sprite_pos(effDamage[i].sprite,
+			effDamage[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W,
+			effDamage[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H);
+		sprite_add(effDamage[i].sprite);
 	}
-	for(u8 i = 0; i < MAX_SMOKE; i++) {
-		if(smoke[i].ttl == 0) continue;
-		smoke[i].ttl--;
-		if(smoke[i].ttl == 0) {
-			sprite_delete(smoke[i].sprite);
-		} else {
-			smoke_update(&smoke[i]);
+	for(uint8_t i = 0; i < MAX_SMOKE; i++) {
+		if(!effSmoke[i].ttl) continue;
+		effSmoke[i].ttl--;
+		// Half assed animation
+		sprite_index(effSmoke[i].sprite,
+			TILE_SMOKEINDEX + 24 - ((effSmoke[i].ttl >> 3) << 2));
+		sprite_pos(effSmoke[i].sprite,
+			effSmoke[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 8,
+			effSmoke[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 8);
+		sprite_add(effSmoke[i].sprite);
+	}
+	for(uint8_t i = 0; i < MAX_MISC; i++) {
+		if(!effMisc[i].ttl) continue;
+		effMisc[i].ttl--;
+		switch(effMisc[i].type) {
+			case EFF_BONKL:
+			{
+				if(effMisc[i].ttl&1) {
+					if(effMisc[i].ttl > 15) {
+						effMisc[i].x--;
+						effMisc[i].y--;
+					}
+					sprite_pos(effMisc[i].sprite,
+						effMisc[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 4,
+						effMisc[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 4);
+					sprite_add(effMisc[i].sprite);
+				}
+			}
+			break;
+			case EFF_BONKR:
+			{
+				if(!(effMisc[i].ttl&1)) {
+					if(effMisc[i].ttl > 15) {
+						effMisc[i].x++;
+						effMisc[i].y--;
+					}
+					sprite_pos(effMisc[i].sprite,
+						effMisc[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 4,
+						effMisc[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 4);
+					sprite_add(effMisc[i].sprite);
+				}
+			}
+			break;
+			case EFF_ZZZ:
+			{
+				if(!(effMisc[i].ttl % TIME(25))) effMisc[i].sprite.attribut++;
+				sprite_pos(effMisc[i].sprite,
+					effMisc[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 4,
+					effMisc[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 4);
+				sprite_add(effMisc[i].sprite);
+			}
+			break;
+			case EFF_BOOST8:
+			{
+				effMisc[i].y++;
+			} /* no break */
+			case EFF_BOOST2:
+			{
+				if(!(effMisc[i].ttl % TIME(5))) effMisc[i].sprite.attribut++;
+				sprite_pos(effMisc[i].sprite,
+					effMisc[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 4,
+					effMisc[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 4);
+				sprite_add(effMisc[i].sprite);
+			}
+			break;
+			case EFF_QMARK:
+			{
+				if(effMisc[i].ttl > TIME(60) && (effMisc[i].ttl & 3) == 0) {
+					effMisc[i].y--;
+				}
+				effMisc[i].ttl--;
+				sprite_pos(effMisc[i].sprite,
+					effMisc[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 4,
+					effMisc[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 4);
+				sprite_add(effMisc[i].sprite);
+			}
+			break;
 		}
 	}
 }
 
-void effect_create_damage_string(s16 num, s16 x, s16 y, u8 ttl) {
-	for(u8 i = 0; i < MAX_DAMAGE_STRINGS; i++) {
-		if(damage_string[i].ttl > 0) continue;
-		u8 anim = num < 0;
+void effect_create_damage(int16_t num, int16_t x, int16_t y) {
+	if(dqueued) return;
+	for(uint8_t i = 0; i < MAX_DAMAGE; i++) {
+		if(effDamage[i].ttl) continue;
+		// Negative numbers are red and show '-' (Damage)
+		// Positive are white and show '+' (Weapon energy)
+		uint8_t negative = (num < 0);
 		num = abs(num);
-		// Determine digit sprites
-		u8 digits = 0;
-		for(; num; digits++) {
-			damage_string[i].sprite[digits] = sprite_create(&SPR_Numbers, PAL0, true);
-			sprite_set_animframe(damage_string[i].sprite[digits], anim, num % 10);
+		uint8_t digitCount = 0; // Number of digit tiles: 1, 2, or 3 after loop
+		// Create right to left, otherwise digits show up backwards
+		uint16_t tileIndex;
+		for(; num; digitCount++) {
+			tileIndex = ((negative ? 11 : 0) + (num % 10)) * 8;
+			memcpy(dtiles[3 - digitCount], &TS_Numbers.tiles[tileIndex], 32);
 			num /= 10;
 		}
-		// First sprite is + or -
-		damage_string[i].sprite[digits] = sprite_create(&SPR_Numbers, PAL0, true);
-		sprite_set_animframe(damage_string[i].sprite[digits], anim, 10);
-		digits++;
-		damage_string[i].x = x;
-		damage_string[i].y = y;
-		damage_string[i].ttl = 60;
-		damage_string[i].sprite_count = digits;
+		tileIndex = ((negative ? 11 : 0) + 10) * 8;
+		memcpy(dtiles[3 - digitCount], &TS_Numbers.tiles[tileIndex], 32); // - or +
+		
+		effDamage[i].ttl = 60; // 1 second
+		effDamage[i].x = x - 8;
+		effDamage[i].y = y;
+		effDamage[i].sprite = (VDPSprite) {
+			.size = SPRITE_SIZE(digitCount+1, 1),
+			.attribut = TILE_ATTR_FULL(PAL0, 1, 0, 0, TILE_NUMBERINDEX + i*4)
+		};
+		TILES_QUEUE(dtiles[3-digitCount], TILE_NUMBERINDEX + i*4, digitCount+1);
+		dqueued = TRUE;
 		break;
 	}
 }
 
-void damage_string_update(damage_string_def *d) {
-	if(d->ttl%2) d->y -= 1;
-	for(u8 i = d->sprite_count; i--;) {
-		sprite_set_position(d->sprite[i],
-			d->x - sub_to_pixel(camera.x) + SCREEN_HALF_W + 16 - (8*i),
-			d->y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 8);
-	}
-}
-
-void damage_string_cleanup(damage_string_def *d) {
-	for(u8 s = 0; s < d->sprite_count; s++) sprite_delete(d->sprite[s]);
-}
-
-void effect_create_smoke(u8 type, s16 x, s16 y) {
-	for(u8 i = 0; i < MAX_SMOKE; i++) {
-		if(smoke[i].ttl > 0) continue;
-		smoke[i].x = x;
-		smoke[i].y = y;
-		smoke[i].ttl = 48;
-		smoke[i].sprite = sprite_create(&SPR_Smoke, PAL1, false);
-		sprite_set_position(smoke[i].sprite,
-				smoke[i].x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 8,
-				smoke[i].y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 8);
+void effect_create_smoke(int16_t x, int16_t y) {
+	for(uint8_t i = 0; i < MAX_SMOKE; i++) {
+		if(effSmoke[i].ttl) continue;
+		effSmoke[i].x = x;
+		effSmoke[i].y = y;
+		effSmoke[i].ttl = 48;
+		effSmoke[i].sprite = (VDPSprite) {
+			.size = SPRITE_SIZE(2, 2),
+			.attribut = TILE_ATTR_FULL(PAL1, 1, 0, 0, TILE_SMOKEINDEX)
+		};
 		break;
 	}
 }
 
-void smoke_update(smoke_def *s) {
-	sprite_set_position(s->sprite,
-			s->x - sub_to_pixel(camera.x) + SCREEN_HALF_W - 8,
-			s->y - sub_to_pixel(camera.y) + SCREEN_HALF_H - 8);
+void effect_create_misc(uint8_t type, int16_t x, int16_t y) {
+	for(uint8_t i = 0; i < MAX_MISC; i++) {
+		if(effMisc[i].ttl) continue;
+		effMisc[i].type = type;
+		effMisc[i].x = x;
+		effMisc[i].y = y;
+		switch(type) {
+			case EFF_BONKL: // Dots that appear when player bonks their head on the ceiling
+			case EFF_BONKR:
+			{
+				effMisc[i].ttl = 30;
+				effMisc[i].sprite = (VDPSprite) {
+					.size = SPRITE_SIZE(1, 1),
+					.attribut = TILE_ATTR_FULL(PAL0,1,0,0,1)
+				};
+			}
+			break;
+			case EFF_ZZZ: // Zzz shown above sleeping NPCs like gunsmith, mimiga, etc
+			{
+				uint8_t sheet = NOSHEET;
+				SHEET_FIND(sheet, SHEET_ZZZ);
+				if(sheet == NOSHEET) break;
+				effMisc[i].ttl = TIME(100);
+				effMisc[i].sprite = (VDPSprite) {
+					.size = SPRITE_SIZE(1, 1),
+					.attribut = TILE_ATTR_FULL(PAL0,1,0,0,sheets[sheet].index)
+				};
+			}
+			break;
+			case EFF_BOOST8: // Smoke that emits while using the booster
+			case EFF_BOOST2:
+			{
+				effMisc[i].ttl = TIME(20);
+				effMisc[i].sprite = (VDPSprite) {
+					.size = SPRITE_SIZE(1, 1),
+					.attribut = TILE_ATTR_FULL(PAL0,1,0,0,12)
+				};
+			}
+			break;
+			case EFF_QMARK:
+			{
+				effMisc[i].ttl = TIME(80);
+				effMisc[i].sprite = (VDPSprite) {
+					.size = SPRITE_SIZE(1, 1),
+					.attribut = TILE_ATTR_FULL(PAL0,1,0,0,TILE_QMARKINDEX)
+				};
+			} 
+			break;
+		}
+		break;
+	}
 }

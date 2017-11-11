@@ -1,31 +1,36 @@
-#include "tsc.h"
+#include "common.h"
 
-#include <genesis.h>
-#include "sprite.h"
+#include "ai.h"
 #include "audio.h"
-#include "player.h"
-#include "entity.h"
-#include "stage.h"
-#include "input.h"
 #include "camera.h"
-#include "resources.h"
-#include "system.h"
-#include "vdp_ext.h"
-#include "tables.h"
+#include "dma.h"
+#include "entity.h"
+#include "effect.h"
+#include "gamemode.h"
 #include "hud.h"
+#include "input.h"
+#include "joy.h"
+#include "memory.h"
+#include "npc.h"
+#include "player.h"
+#include "resources.h"
+#include "sheet.h"
+#include "sprite.h"
+#include "stage.h"
+#include "string.h"
+#include "system.h"
+#include "tables.h"
+#include "vdp.h"
+#include "vdp_bg.h"
+#include "vdp_pal.h"
+#include "vdp_tile.h"
+#include "vdp_ext.h"
 #include "window.h"
 
-// Execution State
-#define TSC_IDLE 0 // Not executing any events
-#define TSC_RUNNING 1 // Executing event commands
-#define TSC_WAITTIME 2 // Waiting on a timer before continuing
-#define TSC_WAITINPUT 3 // Waiting for player to press C
-#define TSC_PROMPT 4 // Prompting yes/no
-#define TSC_TELEMENU 5 // Teleport menu
-#define TSC_WAITGROUNDED 6 // Waiting for the player to touch the ground
+#include "tsc.h"
 
 #define HEAD_EVENT_COUNT 14 // There are exactly 14
-#define MAX_EVENTS 80 // Largest is Plantation with 76
+#define MAX_EVENTS 106 // Largest is ArmsItem with 106
 
 // TSC Commands
 #define FIRST_CMD 0x80
@@ -123,62 +128,78 @@
 #define LAST_CMD 0xda
 
 typedef struct {
-	u16 number;
-	const u8 *data;
+	uint16_t number;
+	const uint8_t *data;
 } Event;
 
 // Array of pointers to each event in the current TSC
 Event headEvents[HEAD_EVENT_COUNT];
 Event stageEvents[MAX_EVENTS];
 
-const u8 *curCommand = NULL;
+const uint8_t *curCommand = NULL;
 
-u8 tscState = TSC_IDLE;
+uint16_t waitTime;
 
-u16 waitTime;
+uint16_t promptJump = 0;
 
-u16 promptJump = 0;
+uint8_t teleMenuActive = FALSE;
+uint8_t teleMenuSlotCount;
+uint16_t teleMenuEvent[8];
+uint8_t teleMenuSelection;
+uint8_t teleMenuSheet = NOSHEET;
+VDPSprite teleMenuSprite[8];
 
-u8 teleMenuSlotCount = 0;
-u16 teleMenuEvent[8];
-u8 teleMenuSelection = 0;
-u8 teleMenuSprite[8];
-u8 teleMenuAnim = 0;
-u8 teleMenuFrame[8];
 
-bool showingBossHealth = false;
-u16 bossMaxHealth;
-u16 bossHealth;
+Entity *bossBarEntity = NULL;
+uint16_t bossMaxHealth;
+uint16_t bossHealth;
 
-u8 tsc_load(Event *eventList, const u8 *TSC, u8 max);
+uint16_t lastAmmoNum = 0;
+
+uint8_t tsc_load(Event *eventList, const uint8_t *TSC, uint8_t max);
 
 void tsc_show_boss_health();
 void tsc_hide_boss_health();
 void tsc_show_teleport_menu();
-void tsc_hide_teleport_menu();
 
-bool execute_command();
-u8 tsc_read_byte();
-u16 tsc_read_word();
+uint8_t execute_command();
+uint8_t tsc_read_byte();
+uint16_t tsc_read_word();
 
+// Load window tiles & the global "head" events
 void tsc_init() {
+	inFade = FALSE;
+	showingBossHealth = FALSE;
+	bossBarEntity = FALSE;
+	bossHealth = 0;
 	tscState = TSC_IDLE;
-	VDP_loadTileSet(&TS_Window, TILE_WINDOWINDEX, true);
-	for(u8 i = 0; i < 8; i++) {
-		teleMenuSprite[i] = SPRITE_NONE;
-	}
-	const u8 *TSC = TSC_Head;
+	teleMenuSlotCount = 0;
+	teleMenuSelection = 0;
+	memset(teleMenuEvent, 0, 16);
+	VDP_loadTileSet(&TS_Window, TILE_WINDOWINDEX, TRUE);
+	const uint8_t *TSC = cfg_language ? JTSC_Head : TSC_Head;
 	tsc_load(headEvents, TSC, HEAD_EVENT_COUNT);
 }
 
-void tsc_load_stage(u8 id) {
-	const u8 *TSC = stage_info[id].TSC;
-	tscEventCount = tsc_load(stageEvents, TSC, MAX_EVENTS);
+void tsc_load_stage(uint8_t id) {
+	if(id == ID_ARMSITEM) { // Stage index 255 is a special case for the item menu
+		const uint8_t *TSC = cfg_language ? JTSC_ArmsItem : TSC_ArmsItem;
+		tscEventCount = tsc_load(stageEvents, TSC, MAX_EVENTS);
+	} else if(id == ID_TELEPORT) {
+		const uint8_t *TSC = cfg_language ? JTSC_StageSelect : TSC_StageSelect;
+		tscEventCount = tsc_load(stageEvents, TSC, MAX_EVENTS);
+	} else if(id == ID_CREDITS) {
+		const uint8_t *TSC = cfg_language ? JTSC_Credits : TSC_Credits;
+		tscEventCount = tsc_load(stageEvents, TSC, MAX_EVENTS);
+	} else {
+		const uint8_t *TSC = cfg_language ? stage_info[id].JTSC : stage_info[id].TSC;
+		tscEventCount = tsc_load(stageEvents, TSC, MAX_EVENTS);
+	}
 }
 
-u8 tsc_load(Event *eventList, const u8 *TSC, u8 max) {
+uint8_t tsc_load(Event *eventList, const uint8_t *TSC, uint8_t max) {
 	// First byte of TSC is the number of events
-	u8 eventCount = TSC[0];
+	uint8_t eventCount = TSC[0];
 	// Make sure it isn't more than can be handled
 	if(eventCount > max) {
 		char str[32] = "Too many events: ";
@@ -186,22 +207,24 @@ u8 tsc_load(Event *eventList, const u8 *TSC, u8 max) {
 		SYS_die(str);
 	}
 	// Step through ROM data until finding all the events
-	u8 loadedEvents = 0;
-	for(u16 i = 1; loadedEvents < eventCount; i++) {
+	uint8_t loadedEvents = 0;
+	for(uint16_t i = 1; loadedEvents < eventCount; i++) {
 		// The event marker is a word 0xFFFF
 		if(TSC[i] == 0xFF && TSC[i+1] == 0xFF) {
 			eventList[loadedEvents].number = TSC[i+2]+(TSC[i+3]<<8);
 			eventList[loadedEvents].data = &TSC[i+4];
 			loadedEvents++;
+			//printf("Ev: %hu, Ind: %hu", eventList[loadedEvents].number, i);
 			i += 3;
 		}
 	}
 	return loadedEvents;
 }
 
-void tsc_call_event(u16 number) {
+void tsc_call_event(uint16_t number) {
+	// Events under 50 will be in Head.tsc
 	if(number < 50) {
-		for(u8 i = 0; i < HEAD_EVENT_COUNT; i++) {
+		for(uint8_t i = 0; i < HEAD_EVENT_COUNT; i++) {
 			if(headEvents[i].number == number) {
 				tscState = TSC_RUNNING;
 				curCommand = headEvents[i].data;
@@ -209,7 +232,7 @@ void tsc_call_event(u16 number) {
 			}
 		}
 	} else {
-		for(u8 i = 0; i < tscEventCount; i++) {
+		for(uint8_t i = 0; i < tscEventCount; i++) {
 			if(stageEvents[i].number == number) {
 				tscState = TSC_RUNNING;
 				curCommand = stageEvents[i].data;
@@ -219,509 +242,1036 @@ void tsc_call_event(u16 number) {
 	}
 }
 
-bool tsc_running() {
-	return tscState != TSC_IDLE;
-}
-
-u8 tsc_update() {
+uint8_t tsc_update() {
 	switch(tscState) {
-	case TSC_IDLE:
-		break; // Nothing to update
-	case TSC_RUNNING:
-		for(;;) {
-			u8 result = execute_command();
-			if(result > 0) return result - 1;
-		}
-		break;
-	case TSC_WAITTIME:
-		waitTime--;
-		if(waitTime == 0) tscState = TSC_RUNNING;
-		break;
-	case TSC_WAITINPUT:
-		if(joy_pressed(BUTTON_C)) {
-			tscState = TSC_RUNNING;
-		}
-		break;
-	case TSC_PROMPT:
-		if(window_prompt_update()) {
-			if(!window_prompt_answer()) tsc_call_event(promptJump);
-			tscState = TSC_RUNNING;
-		}
-		break;
-	case TSC_TELEMENU:
-		if(joy_pressed(BUTTON_C)) {
-			tsc_call_event(teleMenuEvent[teleMenuSelection]);
-			tsc_hide_teleport_menu();
-			tscState = TSC_RUNNING;
-		} else if(joy_pressed(BUTTON_B)) { // Cancel
-			tsc_hide_teleport_menu();
-			tscState = TSC_RUNNING;
-		} else if(joy_pressed(BUTTON_LEFT)) {
-			sprite_set_animframe(teleMenuSprite[teleMenuSelection],
-					0, teleMenuFrame[teleMenuSelection]);
-			if(teleMenuSelection == 0) {
-				teleMenuSelection = teleMenuSlotCount - 1;
-			} else {
-				teleMenuSelection--;
+		case TSC_IDLE: break; // Nothing to update
+		case TSC_RUNNING:
+		{
+			for(;;) {
+				uint8_t result = execute_command();
+				if(result > 0) return result - 1;
 			}
-			sound_play(SOUND_CURSOR, 5);
-		} else if(joy_pressed(BUTTON_RIGHT)) {
-			sprite_set_animframe(teleMenuSprite[teleMenuSelection],
-					0, teleMenuFrame[teleMenuSelection]);
-			if(teleMenuSelection == teleMenuSlotCount - 1) {
-				teleMenuSelection = 0;
-			} else {
-				teleMenuSelection++;
-			}
-			sound_play(SOUND_CURSOR, 5);
-		} else { // Doing nothing, blink cursor
-			teleMenuAnim = !teleMenuAnim;
-			sprite_set_animframe(teleMenuSprite[teleMenuSelection],
-					teleMenuAnim, teleMenuFrame[teleMenuSelection]);
 		}
 		break;
-	case TSC_WAITGROUNDED:
-		if(player.grounded) tscState = TSC_RUNNING;
+		case TSC_WAITTIME:
+		{
+			// Game will lock up if <WAI0000 is used. Don't do that
+			if(waitTime == 0) {
+				tscState = TSC_RUNNING;
+			} else {
+				waitTime--;
+				// ArmsItem uses <WAI9999 after everything. The original game probably uses this
+				// in some weird way but it'll just freeze here, so don't <WAI in the pause menu
+				if(paused) {
+					waitTime = 0;
+				// Check the wait time again to prevent underflowing
+				} else if(waitTime > 0 && joy_down(btn[cfg_btn_ffwd])) {
+					if(cfg_ffwd) {
+						// Fast forward while holding A, update active entities a second time
+						// to double their movement speed (unless <PRI is set)
+						waitTime--;
+						if(!gameFrozen) entities_update();
+					}
+				}
+			}
+		}
 		break;
-	default:
-		SYS_die("Invalid TSC State");
+		case TSC_WAITINPUT:
+		{
+			if(joy_pressed(btn[cfg_btn_jump]) || (cfg_ffwd && (joystate & btn[cfg_btn_ffwd]))) {
+				tscState = TSC_RUNNING;
+				if(cfg_language) {
+					window_draw_jchar(FALSE, ' '); // Clear blinking cursor
+				} else {
+					window_draw_char(' '); // Clear blinking cursor
+				}
+			}
+		}
+		break;
+		case TSC_PROMPT:
+		{
+			if(window_prompt_update()) {
+				// Answering No will jump to another event
+				tscState = TSC_RUNNING;
+				if(!window_prompt_answer()) tsc_call_event(promptJump);
+			}
+		}
+		break;
+		case TSC_TELEMENU:
+		{
+			if(joy_pressed(btn[cfg_btn_jump])) {
+				// Reload current stage's TSC, and run event for warp
+				teleMenuActive = FALSE;
+				tsc_load_stage(stageID);
+				tsc_call_event(teleMenuEvent[teleMenuSelection]);
+				tscState = TSC_RUNNING;
+			} else if(joy_pressed(btn[cfg_btn_shoot])) { // Cancel
+				teleMenuActive = FALSE;
+				tsc_load_stage(stageID);
+				// Manually force event to end
+				tscState = TSC_IDLE;
+				gameFrozen = FALSE;
+				window_set_face(0, FALSE);
+				window_close();
+				controlsLocked = FALSE;
+				hud_show();
+			} else if(joy_pressed(BUTTON_LEFT)) {
+				sprite_index(teleMenuSprite[teleMenuSelection], 
+						sheets[teleMenuSheet].index + teleMenuSelection*16);
+				if(teleMenuSelection == 0) {
+					teleMenuSelection = teleMenuSlotCount - 1;
+				} else {
+					teleMenuSelection--;
+				}
+				sound_play(SND_MENU_MOVE, 5);
+				// Writes location name in the window
+				tsc_call_event(1000 + teleMenuSelection + 1);
+				while(tscState != TSC_IDLE) execute_command();
+				tscState = TSC_TELEMENU; // Don't break away from the menu
+			} else if(joy_pressed(BUTTON_RIGHT)) {
+				sprite_index(teleMenuSprite[teleMenuSelection], 
+						sheets[teleMenuSheet].index + teleMenuSelection*16);
+				if(teleMenuSelection == teleMenuSlotCount - 1) {
+					teleMenuSelection = 0;
+				} else {
+					teleMenuSelection++;
+				}
+				sound_play(SND_MENU_MOVE, 5);
+				
+				tsc_call_event(1000 + teleMenuSelection + 1);
+				while(tscState != TSC_IDLE) execute_command();
+				tscState = TSC_TELEMENU;
+			} else { // Doing nothing, blink cursor
+				bossHealth ^= 8;
+				sprite_index(teleMenuSprite[teleMenuSelection], 
+						sheets[teleMenuSheet].index + teleMenuSelection*16 + bossHealth);
+			}
+			sprite_addq(teleMenuSprite, teleMenuSlotCount);
+			// --WARP-- text
+			sprite_add(teleMenuSprite[6]);
+			sprite_add(teleMenuSprite[7]);
+		}
+		break;
+		case TSC_WAITGROUNDED:
+		{
+			if(player.grounded) tscState = TSC_RUNNING;
+		}
+		break;
+		default:
+		{
+			tscState = TSC_IDLE;
+		}
 		break;
 	}
 	return 0;
 }
 
 void tsc_show_boss_health() {
-
+	showingBossHealth = TRUE;
+	// Fill map name space with boss bar
+	static const char boss[4] = "Boss";
+	for(uint8_t i = 0; i < 4; i++) {
+		VDP_loadTileData(&TS_SysFont.tiles[8*(boss[i]-0x20)], TILE_NAMEINDEX+i, 1, TRUE);
+	}
+	for(uint8_t i = 0; i < 8; i++) {
+		VDP_loadTileData(&TS_HudBar.tiles[8*7], TILE_NAMEINDEX+4+i, 1, TRUE);
+	}
+	// Create sprites to display the string
+	memset(teleMenuSprite, 0, sizeof(VDPSprite) * 8);
+	uint8_t yoff = IS_PALSYSTEM ? 24 : 16;
+	teleMenuSprite[5] = (VDPSprite) { 
+		.x = 160 + 32 + 128, .y = SCREEN_HEIGHT - yoff + 128,
+		.size = SPRITE_SIZE(4,1), .attribut = TILE_ATTR_FULL(PAL0,1,0,0,TILE_NAMEINDEX)
+	};
+	teleMenuSprite[6] = (VDPSprite) { 
+		.x = 160 + 64 + 128, .y = SCREEN_HEIGHT - yoff + 128,
+		.size = SPRITE_SIZE(4,1), .attribut = TILE_ATTR_FULL(PAL0,1,0,0,TILE_NAMEINDEX+4)
+	};
+	teleMenuSprite[7] = (VDPSprite) { 
+		.x = 160 + 96 + 128, .y = SCREEN_HEIGHT - yoff + 128,
+		.size = SPRITE_SIZE(4,1), .attribut = TILE_ATTR_FULL(PAL0,1,0,0,TILE_NAMEINDEX+8)
+	};
 }
 
-void tsc_hide_boss_health() {
+void tsc_update_boss_health() {
+	if(!bossBarEntity || bossBarEntity->state == STATE_DELETE) {
+		bossBarEntity = NULL;
+		showingBossHealth = FALSE;
+		return;
+	}
+	if(bossHealth != bossBarEntity->health) {
+		bossHealth = bossBarEntity->health;
+		if(bossHealth == 0) {
+			// Boss is dead hide the bar
+			bossBarEntity = NULL;
+			showingBossHealth = FALSE;
+			return;
+		}
+		uint16_t hp = bossHealth, inc = bossMaxHealth / 8, i;
+		// Filled tiles
+		for(i = 0; i < 8 && hp >= inc; i++) {
+			hp -= inc;
+		}
+		// If boss health is full no need to go any further
+		if(bossHealth == bossMaxHealth) return;
+		// Draw a partial filled tile
+		if(inc) {
+			uint16_t index = min(((hp << 3) / inc) << 3, 72);
+			VDP_loadTileData(&TS_HudBar.tiles[index], TILE_NAMEINDEX+4+i, 1, TRUE);
+		} else {
+			// Don't divide by zero
+			VDP_loadTileData(&TS_HudBar.tiles[8*3], TILE_NAMEINDEX+4+i, 1, TRUE);
+		}
+		// Draw empty tile after it
+		if(++i < 8) {
+			VDP_loadTileData(TS_HudBar.tiles, TILE_NAMEINDEX+4+i, 1, TRUE);
+		}
+	}
+	
+	sprite_add(teleMenuSprite[5]);
+	sprite_add(teleMenuSprite[6]);
+	sprite_add(teleMenuSprite[7]);
+}
 
+static void tsc_render_warp_text() {
+	uint8_t text[8][TILE_SIZE];
+	static const char string[8] = "--WARP--";
+	// Copy tiles for ascii string "--WARP--" into memory
+	for(uint8_t i = 0; i < 8; i++) {
+		memcpy(text[i], &TS_SysFont.tiles[(string[i] - 0x20) * 8], TILE_SIZE);
+	}
+	// Copy our string to VRAM
+	DMA_doDma(DMA_VRAM, (uint32_t) text[0], TILE_NAMEINDEX << 5, (8 * TILE_SIZE) >> 1, 2);
+	// Create sprites to display the string
+	teleMenuSprite[6] = (VDPSprite) { 
+		.x = 160 - 32 + 128, .y = 32 + 128,
+		.size = SPRITE_SIZE(4,1), .attribut = TILE_ATTR_FULL(PAL0,1,0,0,TILE_NAMEINDEX)
+	};
+	teleMenuSprite[7] = (VDPSprite) { 
+		.x = 160 + 128, .y = 32 + 128,
+		.size = SPRITE_SIZE(4,1), .attribut = TILE_ATTR_FULL(PAL0,1,0,0,TILE_NAMEINDEX+4)
+	};
 }
 
 void tsc_show_teleport_menu() {
+	//mapNameTTL = 0; // We will be clobbering the tiles that display the map name
+	memset(teleMenuSprite, 0, sizeof(VDPSprite) * 8);
+	tsc_render_warp_text();
+	
 	teleMenuSlotCount = 0;
-	for(u8 i = 0; i < 8; i++) {
+	SHEET_FIND(teleMenuSheet, SHEET_TELE);
+	for(uint8_t i = 0; i < 8; i++) {
 		if(teleportEvent[i] == 0) continue;
 		teleMenuEvent[teleMenuSlotCount] = teleportEvent[i];
-		teleMenuSprite[teleMenuSlotCount] = sprite_create(&SPR_TeleMenu, PAL0, true);
-		teleMenuFrame[teleMenuSlotCount] = i;
-		sprite_set_frame(teleMenuSprite[teleMenuSlotCount], i);
-		sprite_set_position(teleMenuSprite[teleMenuSlotCount], 64 + 64*teleMenuSlotCount, 64);
+		teleMenuSprite[teleMenuSlotCount] = (VDPSprite) {
+			.x = 24 + i*40 + 128, .y = 96 + 128,
+			.size = SPRITE_SIZE(4, 2),
+			.attribut = TILE_ATTR_FULL(PAL0,1,0,0,sheets[teleMenuSheet].index + (i-1)*16)
+		};
 		teleMenuSlotCount++;
 	}
+	tsc_load_stage(ID_TELEPORT);
 	if(teleMenuSlotCount > 0) {
+		teleMenuActive = TRUE;
+		tsc_call_event(1000 + teleMenuSelection + 1);
+		while(tscState != TSC_IDLE) execute_command();
 		tscState = TSC_TELEMENU;
+		VDP_setWindowPos(0, IS_PALSYSTEM ? 245 : 244);
+		controlsLocked = TRUE;
+		// I use bossHealth to tick back and forth between 0 and 8 so the cursor will flash
+		// since bosses don't happen in Arthur's house
+		bossHealth = 0;
 	} else {
-		tscState = TSC_RUNNING; // Don't bother with the menu if we can't teleport
+		tsc_call_event(1000);
+		while(tscState != TSC_IDLE) execute_command();
+		tsc_load_stage(stageID);
 	}
 }
 
-void tsc_hide_teleport_menu() {
-	for(u8 i = 0; i < 8; i++) {
-		sprite_delete(teleMenuSprite[i]);
-		teleMenuSprite[i] = SPRITE_NONE;
-	}
-}
-
-u8 execute_command() {
-	u16 args[4];
-	u8 cmd = tsc_read_byte();
-	if(cmd >= 0x80) {
+uint8_t execute_command() {
+	uint16_t args[4];
+	uint8_t cmd = tsc_read_byte();
+	if(cmd >= 0x80 && cmd < 0xE0) {
 		switch(cmd) {
 		case CMD_MSG: // Display message box (bottom - visible)
-		case CMD_MS2: // Display message box (top - invisible)
-		case CMD_MS3: // Display message box (top - visible)
+		{
 			window_open(0);
-			break;
+		}
+		break;
+		case CMD_MS2: // Display message box (top - invisible)
+		{
+			// Hide face or else doctor will talk with Misery's face graphic
+			window_set_face(0, 0);
+			window_open(1);
+		}
+		break;
+		case CMD_MS3: // Display message box (top - visible)
+		{
+			window_open(1);
+		}
+		break;
 		case CMD_CLO: // Close message box
+		{
 			window_close();
-			break;
+		}
+		break;
 		case CMD_CLR: // Clear message box
+		{
 			window_clear();
-			break;
-		case CMD_NUM: // TODO: Show number (1) in message box
+		}
+		break;
+		case CMD_NUM: // Show number (1) in message box
+		{
 			args[0] = tsc_read_word();
-			break;
-		case CMD_GIT: // TODO: Display item (1) in message box
+			char str[12];
+			intToStr(lastAmmoNum, str, 1);
+			for(uint8_t i = 0; str[i] != 0 && i < 12; i++) {
+				window_draw_char(str[i]);
+			}
+		}
+		break;
+		case CMD_GIT: // Display item (1) in message box
+		{
 			args[0] = tsc_read_word();
-			break;
+			if(args[0] >= 1000) {
+				window_show_item(args[0] - 1000);
+			} else {
+				window_show_weapon(args[0]);
+			}
+		}
+		break;
 		case CMD_FAC: // Display face (1) in message box
+		{
 			args[0] = tsc_read_word();
-			window_set_face(args[0]);
-			break;
+			window_set_face(args[0], TRUE);
+		}
+		break;
 		case CMD_CAT: // All 3 of these display text instantly
-		case CMD_SAT:
+		{
 			window_set_textmode(TM_LINE);
-			break;
+		}
+		break;
+		case CMD_SAT:
+		{
+			window_set_textmode(TM_LINE);
+		}
+		break;
 		case CMD_TUR:
+		{
 			window_set_textmode(TM_ALL);
-			break;
+		}
+		break;
 		case CMD_YNJ: // Prompt Yes/No and jump to event (1) if No
+		{
 			args[0] = tsc_read_word();
 			promptJump = args[0];
 			window_prompt_open();
 			tscState = TSC_PROMPT;
 			return 1;
+		}
+		break;
 		case CMD_END: // End the event
+		{
 			tscState = TSC_IDLE;
-			window_close();
-			player_unlock_controls();
-			hud_show();
+			if(!paused && !teleMenuActive) {
+				gameFrozen = FALSE;
+				window_set_face(0, FALSE);
+				window_close();
+				controlsLocked = FALSE;
+				hud_show();
+			}
 			return 1;
+		}
+		break;
 		case CMD_EVE: // Jump to event (1)
+		{
 			args[0] = tsc_read_word();
 			tsc_call_event(args[0]);
-			break;
+		}
+		break;
 		case CMD_TRA: // Teleport to stage (1), run event (2), coords (3),(4)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			args[2] = tsc_read_word();
 			args[3] = tsc_read_word();
-			player.x = block_to_sub(args[2]) + pixel_to_sub(8);
-			player.y = block_to_sub(args[3]) + pixel_to_sub(8);
-			window_close();
-			stage_load(args[0]);
-			tsc_call_event(args[1]);
-			return 1;
+			if(gamemode == GM_CREDITS) {
+				if(args[0] == 0) {
+					VDP_clearPlan(PLAN_A, TRUE);
+					entities_clear();
+					sprites_clear();
+					entity_create(240 << CSF, 120 << CSF, OBJ_NPC_PLAYER, 0)->state = 100;
+					tsc_load_stage(ID_CREDITS);
+				} else {
+					stage_load_credits(args[0]);
+				}
+				tsc_call_event(args[1]);
+				return 1;
+			} else {
+				if(args[0] == 0) return 5; // Room ID 0 is credits
+				player.x = block_to_sub(args[2]) + pixel_to_sub(8);
+				player.y = block_to_sub(args[3]) + pixel_to_sub(8);
+				player.x_speed = 0;
+				player.y_speed = 0;
+				player.grounded = FALSE;
+				gameFrozen = FALSE;
+				window_set_face(0, FALSE);
+				window_close();
+				stage_load(args[0]);
+				tsc_call_event(args[1]);
+				return 1;
+			}
+		}
+		break;
 		case CMD_INI: // Start from beginning (try again without save data)
+		{
 			return 4;
+		}
+		break;
 		case CMD_ESC: // Restart the game
+		{
 			return 2;
+		}
+		break;
 		case CMD_LDP: // Reload save file (try again)
+		{
 			return 3;
+		}
+		break;
 		case CMD_CMU: // Play song (1), stop if 0
+		{
 			args[0] = tsc_read_word();
 			song_play(args[0]);
-			break;
+		}
+		break;
 		case CMD_FMU: // Fade out music (we just stop for now)
+		{
 			song_stop();
-			break;
+		}
+		break;
 		case CMD_RMU: // Resume previously playing music
+		{
 			song_resume();
-			break;
+		}
+		break;
 		case CMD_SOU: // Play sound (1)
+		{
 			args[0] = tsc_read_word();
-			sound_play(args[0], 0);
-			break;
-		case CMD_SPS: // TODO: Persistent sounds, skip for now
-		case CMD_CPS:
-		case CMD_CSS:
-			break;
-		case CMD_SSS:
-			args[0] = tsc_read_word();
-			break;
+			sound_play(args[0], 5);
+		}
+		break;
+		
+		// TODO: Persistent sounds, skip for now
+		case CMD_SPS: break;
+		case CMD_CPS: break;
+		case CMD_SSS: args[0] = tsc_read_word(); break;
+		case CMD_CSS: break;
+			
 		case CMD_NOD: // Wait for player input
+		{
 			tscState = TSC_WAITINPUT;
+			linesSinceLastNOD = 0;
 			return 1;
+		}
+		break;
 		case CMD_WAI: // Wait (1) frames
+		{
 			args[0] = tsc_read_word();
 			tscState = TSC_WAITTIME;
-			waitTime = args[0];
+			waitTime = TIME(args[0]);
 			return 1;
+		}
+		break;
 		case CMD_WAS: // Wait for player to hit the ground
+		{
 			tscState = TSC_WAITGROUNDED;
 			return 1;
+		}
+		break;
 		case CMD_MM0: // Halt player movement
+		{
 			player.x_speed = 0;
 			player.y_speed = 0;
-			break;
+		}
+		break;
 		case CMD_MOV: // Move player to coordinates (1),(2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
-			player.x = block_to_sub(args[0]) + pixel_to_sub(8);
-			player.y = block_to_sub(args[1]) + pixel_to_sub(8);
-			player.grounded = false;
-			break;
+			player.x = block_to_sub(args[0]) + (8 << CSF);
+			player.y = block_to_sub(args[1]) + (8 << CSF);
+			player.grounded = FALSE;
+		}
+		break;
 		case CMD_MYB: // Bounce player in direction (1)
+		{
 			args[0] = tsc_read_word();
-			if(args[0] == 0) { // Left
-				player.x_speed = pixel_to_sub(1);
-			} else if(args[0] == 2) { // Right
-				player.x_speed = pixel_to_sub(-1);
+			if(args[0] == 0) { // Right
+				player.x_speed = SPEED(0x200);
+			} else if(args[0] == 2) { // Left
+				player.x_speed = -SPEED(0x200);
 			}
-			player.y_speed = pixel_to_sub(-2);
-			break;
+			player.y_speed = -SPEED(0x400);
+		}
+		break;
 		case CMD_MYD: // Change direction to (1)
+		{
 			args[0] = tsc_read_word();
 			if(args[0] == 0) { // Left
-				player.direction = 0;
+				player.dir = 0;
 			} else if(args[0] == 2) { // Right
-				player.direction = 1;
+				player.dir = 1;
 			}
-			sprite_set_attr(player.sprite, TILE_ATTR(PAL0, false, false, player.direction));
-			break;
-		case CMD_UNI: // TODO: Change movement type to (1)
+			player.x_speed = 0;
+			lookingDown = FALSE;
+		}
+		break;
+		case CMD_UNI: // Change movement type to (1)
+		{
 			args[0] = tsc_read_word();
-			break;
-		case CMD_UNJ: // TODO: If movement type is (1) jump to event (2)
-			args[0] = tsc_read_word();
-			args[1] = tsc_read_word();
-			break;
-		case CMD_KEY: // Lock controls and hide the HUD
-			player_lock_controls();
-			hud_hide();
-			break;
-		case CMD_PRI: // Lock controls
-			player_lock_controls();
-			break;
-		case CMD_FRE: // Unlock controls
-			player_unlock_controls();
-			hud_show();
-			break;
-		case CMD_HMC: // Hide player character
-			sprite_set_visible(player.sprite, false);
-			break;
-		case CMD_SMC: // Show player character
-			sprite_set_visible(player.sprite, true);
-			break;
-		case CMD_LI_ADD: // Restore health by (1)
-			args[0] = tsc_read_word();
-			player_heal(args[0]);
-			break;
-		case CMD_ML_ADD: // Increase max health by (1)
-			args[0] = tsc_read_word();
-			player_maxhealth_increase(args[0]);
-			break;
-		case CMD_ANP: // Give all entities (1) script state (2) with direction (3)
+			playerMoveMode = args[0];
+		}
+		break;
+		case CMD_UNJ: // If movement type is (1) jump to event (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
-			args[2] = tsc_read_word();
-			entities_set_state(FILTER_EVENT, args[0], args[1], args[2] > 0);
-			break;
-		case CMD_CNP: // Change all entities (1) to type (2) with direction (3)
-			args[0] = tsc_read_word();
-			args[1] = tsc_read_word();
-			args[2] = tsc_read_word();
-			entities_replace(FILTER_EVENT, args[0], args[1], args[2] > 0, 0);
-			break;
-		case CMD_MNP: // Move entity (1) to (2),(3) with direction (4)
-			args[0] = tsc_read_word();
-			args[1] = tsc_read_word();
-			args[2] = tsc_read_word();
-			args[3] = tsc_read_word();
-			entities_set_position(FILTER_EVENT, args[0], args[1], args[2], args[3] > 0);
-			break;
-		case CMD_DNA: // Delete all entities of type (1)
-			args[0] = tsc_read_word();
-			entities_clear(FILTER_TYPE, args[0]);
-			break;
-		case CMD_DNP: // Delete all entities with event # (1)
-			args[0] = tsc_read_word();
-			entities_clear(FILTER_EVENT, args[0]);
-			break;
-		// Change entity (1) to type (2) with direction (3) and set flag 0x1000?
-		case CMD_INP:
-			args[0] = tsc_read_word();
-			args[1] = tsc_read_word();
-			args[2] = tsc_read_word();
-			entities_replace(FILTER_EVENT, args[0], args[1], args[2] > 0, 0x1000);
-			break;
-		case CMD_SNP: // Create entity (1) at (2),(3) with direction (4)
-			args[0] = tsc_read_word();
-			args[1] = tsc_read_word();
-			args[2] = tsc_read_word();
-			args[3] = tsc_read_word();
-			if(args[3] > 0) {
-				Entity *e = entity_create(args[1], args[2], 0, 0, args[0], 0);
-				if(e->sprite == SPRITE_NONE) break;
-				e->direction = 1;
-				u16 pal = (sprite_get_direct(e->sprite)->attribut & TILE_ATTR_PALETTE_MASK) >> 13;
-				sprite_set_attr(e->sprite, TILE_ATTR(pal, 0, 0, 1));
-			} else {
-				entity_create(args[1], args[2], 0, 0, args[0], 0);
-			}
-			break;
-		case CMD_BOA: // TODO: Give map boss state (1)
-			args[0] = tsc_read_word();
-			break;
-		case CMD_BSL: // Start boss fight with entity (1)
-			args[0] = tsc_read_word();
-			bossEntity = entity_find_by_event(args[0]);
-			if(bossEntity != NULL) {
-				tsc_show_boss_health();
-			}
-			break;
-		case CMD_NCJ: // If entity type (1) exists jump to event (2)
-			args[0] = tsc_read_word();
-			args[1] = tsc_read_word();
-			if(entity_exists(args[0])) {
+			if(playerMoveMode == args[0]) {
 				tsc_call_event(args[1]);
 			}
-			break;
-		case CMD_ECJ: // If entity id (1) exists jump to event (2)
+		}
+		break;
+		case CMD_KEY: // Lock controls and hide the HUD
+		{
+			controlsLocked = TRUE;
+			hud_hide();
+			gameFrozen = FALSE;
+		}
+		break;
+		case CMD_PRI: // Lock controls
+		{
+			controlsLocked = TRUE;
+			gameFrozen = TRUE;
+		}
+		break;
+		case CMD_FRE: // Unlock controls
+		{
+			controlsLocked = FALSE;
+			hud_show();
+			gameFrozen = FALSE;
+		}
+		break;
+		case CMD_HMC: // Hide player character
+		{
+			player.hidden = TRUE;
+		}
+		break;
+		case CMD_SMC: // Show player character
+		{
+			player.hidden = FALSE;
+		}
+		break;
+		case CMD_LI_ADD: // Restore health by (1)
+		{
+			args[0] = tsc_read_word();
+			player_heal(args[0]);
+		}
+		break;
+		case CMD_ML_ADD: // Increase max health by (1)
+		{
+			args[0] = tsc_read_word();
+			player_maxhealth_increase(args[0]);
+		}
+		break;
+		case CMD_ANP: // Give all entities of event (1) script state (2) with direction (3)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
-			// This one is actually unused so I won't bother
-			break;
+			args[2] = tsc_read_word();
+			entities_set_state(args[0], args[1], mddir(args[2]));
+		}
+		break;
+		case CMD_CNP: // Change all entities of event (1) to type (2) with direction (3)
+		{
+			args[0] = tsc_read_word();
+			args[1] = tsc_read_word();
+			args[2] = tsc_read_word();
+			entities_replace(args[0], args[1], mddir(args[2]), 0);
+		}
+		break;
+		case CMD_MNP: // Move entity of event (1) to (2),(3) with direction (4)
+		{
+			args[0] = tsc_read_word();
+			args[1] = tsc_read_word();
+			args[2] = tsc_read_word();
+			args[3] = tsc_read_word();
+			entities_move(args[0], args[1], args[2], mddir(args[3]));
+		}
+		break;
+		case CMD_DNA: // Delete all entities of type (1)
+		{
+			args[0] = tsc_read_word();
+			entities_clear_by_type(args[0]);
+		}
+		break;
+		case CMD_DNP: // Delete all entities with event # (1)
+		{
+			args[0] = tsc_read_word();
+			entities_clear_by_event(args[0]);
+		}
+		break;
+		// Change entity of event (1) to type (2) with direction (3) and set option 2 flag
+		case CMD_INP:
+		{
+			args[0] = tsc_read_word();
+			args[1] = tsc_read_word();
+			args[2] = tsc_read_word();
+			entities_replace(args[0], args[1], mddir(args[2]), 0x1000);
+		}
+		break;
+		case CMD_SNP: // Create entity (1) at (2),(3) with direction (4)
+		{
+			args[0] = tsc_read_word();
+			args[1] = tsc_read_word();
+			args[2] = tsc_read_word();
+			args[3] = tsc_read_word();
+			Entity *e = entity_create((args[1]<<CSF)*16+(8<<CSF), 
+									  (args[2]<<CSF)*16+(8<<CSF), args[0], 0);
+			e->dir = mddir(args[3]);
+		}
+		break;
+		case CMD_BOA: // Set boss state to (1)
+		{
+			args[0] = tsc_read_word();
+			// The real cave story has the stage boss created at stage load in a dormant state.
+			// NXEngine also does this, but I don't, instead waiting until the boss is used
+			// In a <BOA command to create it. A bit hacky but it works.
+			if(stageID == 0x0A && args[0] == 20) {
+				// Omega in Sand Zone
+				bossEntity = entity_create(0, 0, 360 + BOSS_OMEGA, 0);
+				bossEntity->event = 210;
+				bossEntity->state = 20;
+			} else if(stageID == 0x27 && args[0] == 1) {
+				// Monster X - #0301 <BOA0001
+				bossEntity = entity_create(0, 0, 360 + BOSS_MONSTERX, 0);
+				bossEntity->event = 1000;
+				bossEntity->state = 1;
+			} else if(stageID == 0x2F && args[0] == 200) {
+				// Core
+				bossEntity = entity_create(0, 0, 360 + BOSS_CORE, 0);
+				bossEntity->event = 1000;
+				bossEntity->state = 200;
+			} else if(stageID == 0x33 && args[0] == 20) {
+				// Dragon Sisters
+				bossEntity = entity_create(0, 0, 360 + BOSS_SISTERS, 0);
+				bossEntity->event = 1000;
+				bossEntity->state = 20;
+			} else if(bossEntity) {
+				bossEntity->state = args[0];
+			}
+		}
+		break;
+		case CMD_BSL: // Start boss fight with entity (1)
+		{
+			args[0] = tsc_read_word();
+			// Value of 0 looks for major boss
+			if(!args[0]) {
+				if((bossBarEntity = bossEntity)) {
+					bossMaxHealth = bossHealth = bossBarEntity->health;
+					tsc_show_boss_health();
+					break;
+				}
+			} // Other values search for entity with event # of the parameter
+			else if((bossBarEntity = entity_find_by_event(args[0]))) {
+				bossMaxHealth = bossHealth = bossBarEntity->health;
+				tsc_show_boss_health();
+				break;
+			}
+		}
+		break;
+		case CMD_NCJ: // If entity type (1) exists jump to event (2)
+		{
+			args[0] = tsc_read_word();
+			args[1] = tsc_read_word();
+			if(entity_find_by_type(args[0])) tsc_call_event(args[1]);
+		}
+		break;
+		case CMD_ECJ: // If entity id (1) exists jump to event (2)
+		{
+			args[0] = tsc_read_word();
+			args[1] = tsc_read_word();
+			if(entity_find_by_id(args[0])) tsc_call_event(args[1]);
+		}
+		break;
 		case CMD_AE_ADD: // Refill all weapon ammo
+		{
 			player_refill_ammo();
-			break;
-		case CMD_ZAM: // Take away all weapons and ammo
-			player_take_allweapons();
-			break;
+		}
+		break;
+		case CMD_ZAM: // Make all weapons level 1
+		{
+			player_delevel_weapons();
+		}
+		break;
 		case CMD_AM_ADD: // Give weapon (1) and ammo (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			player_give_weapon(args[0], args[1]);
-			break;
+			lastAmmoNum = args[1];
+		}
+		break;
 		case CMD_AM_SUB: // Remove weapon (1)
+		{
 			args[0] = tsc_read_word();
 			player_take_weapon(args[0]);
-			break;
+		}
+		break;
 		case CMD_TAM: // Trade weapon (1) for (2) with (3) max ammo
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			args[2] = tsc_read_word();
 			player_trade_weapon(args[0], args[1], args[2]);
-			break;
+		}
+		break;
 		case CMD_AMJ: // If player has weapon (1) jump to event (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			if(player_has_weapon(args[0])) tsc_call_event(args[1]);
-			break;
-			// These two equip commands actually give a flag between 1<<0 and 1<<8
+		}
+		break;
+		// These two equip commands actually give a flag between 1<<0 and 1<<8
 		case CMD_EQ_ADD: // Equip item (1)
+		{
 			args[0] = tsc_read_word();
 			player_equip(args[0]);
-			break;
+		}
+		break;
 		case CMD_EQ_SUB: // Remove equip (1)
+		{
 			args[0] = tsc_read_word();
 			player_unequip(args[0]);
-			break;
+		}
+		break;
 		case CMD_IT_ADD: // Give item (1)
 			args[0] = tsc_read_word();
 			player_give_item(args[0]);
 			break;
 		case CMD_IT_SUB: // Remove item (1)
+		{
 			args[0] = tsc_read_word();
 			player_take_item(args[0]);
-			break;
+		}
+		break;
 		case CMD_ITJ: // If player has item (1) jump to event (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			if(player_has_item(args[0])) tsc_call_event(args[1]);
-			break;
+		}
+		break;
 		case CMD_FL_ADD: // Set flag (1)
+		{
 			args[0] = tsc_read_word();
-			system_set_flag(args[0], true);
-			//entities_handle_flag(args[0], true);
-			break;
+			system_set_flag(args[0], TRUE);
+		}
+		break;
 		case CMD_FL_SUB: // Unset flag (1)
+		{
 			args[0] = tsc_read_word();
-			system_set_flag(args[0], false);
-			//entities_handle_flag(args[0], false);
-			break;
-		case CMD_FLJ: // If flag (1) is true jump to event (2)
+			system_set_flag(args[0], FALSE);
+		}
+		break;
+		case CMD_FLJ: // If flag (1) is TRUE jump to event (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			if(system_get_flag(args[0])) tsc_call_event(args[1]);
-			break;
+		}
+		break;
 		case CMD_SK_ADD: // Set skip flag (1)
+		{
 			args[0] = tsc_read_word();
-			system_set_skip_flag(args[0], true);
-			break;
+			system_set_skip_flag(args[0], TRUE);
+		}
+		break;
 		case CMD_SK_SUB: // Unset skip flag (1)
+		{
 			args[0] = tsc_read_word();
-			system_set_skip_flag(args[0], false);
-			break;
-		case CMD_SKJ: // If skip flag (1) is true jump to event (2)
+			system_set_skip_flag(args[0], FALSE);
+		}
+		break;
+		case CMD_SKJ: // If skip flag (1) is TRUE jump to event (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			if(system_get_skip_flag(args[0])) tsc_call_event(args[1]);
-			break;
-		case CMD_FOB: // Focus on boss/NPC (1) with (2) ticks
-		case CMD_FON: // TODO: Figure out the difference between these
+		}
+		break;
+		case CMD_FOB: // Focus on boss (1) with (2) ticks
+		{
+			if(bossEntity) camera.target = bossEntity;
+		}
+		break;
+		case CMD_FON: // Focus on NPC (1) with (2) ticks
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			Entity *e = entity_find_by_event(args[0]);
-			if(e != NULL) camera.target = e;
-			else camera.target = &player;
-			break;
+			camera.target = e ? e : &player;
+		}
+		break;
 		case CMD_FOM: // Focus on player at (1) speed
+		{
 			args[0] = tsc_read_word();
 			camera.target = &player;
-			break;
+		}
+		break;
 		case CMD_QUA: // Shake camera for (1) frames
+		{
 			args[0] = tsc_read_word();
 			camera_shake(args[0]);
-			break;
-		case CMD_FAI: // TODO: Fading, in direction (1)
+		}
+		break;
+		case CMD_FAI: // Fading, in direction (1)
+		{
 			args[0] = tsc_read_word();
-			//VDP_setEnable(true);
-			break;
+			if(gamemode != GM_CREDITS) {
+				inFade = FALSE; // Unlock sprites from updating
+				vsync(); // Wait a frame to let the sprites redraw
+				aftervsync();
+			}
+			VDP_fadeTo(0, 63, VDP_getCachedPalette(), 20, TRUE);
+		}
+		break;
 		case CMD_FAO:
+		{
 			args[0] = tsc_read_word();
-			//VDP_setEnable(false);
-			break;
-		case CMD_FLA: // TODO: Flash screen white
-			break;
-		case CMD_MLP: // TODO: Show the map
-			break;
-		case CMD_MNA: // TODO: Show stage name
-			break;
+			if(gamemode != GM_CREDITS) {
+				VDP_fadeTo(0, 63, PAL_FadeOut, 20, FALSE);
+				// Blank the sprite list in VRAM
+				sprites_clear();
+				inFade = TRUE;
+			} else {
+				VDP_fadeTo(0, 63, PAL_FadeOutBlue, 20, TRUE);
+				waitTime = 20;
+				return 1;
+			}
+		}
+		break;
+		case CMD_FLA: // Flash screen white
+		{
+			VDP_flashWhite();
+		}
+		break;
+		case CMD_MLP: // Show the map
+		{
+			do_map();
+		}
+		break;
+		case CMD_MNA: // Show stage name
+		{
+			player_show_map_name(180);
+		}
+		break;
 		case CMD_CMP: // Change stage tile at (1),(2) to type (3)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			args[2] = tsc_read_word();
+			if(args[0] >= stageWidth || args[1] >= stageHeight) {
+				// Outside of the map -- don't do this
+				break;
+			}
+			// When I crushed some larger tilesets to better fit VRAM I inadvertently broke
+			// CMP for maps using those tilesets. Thankfully TSC instructions are not critical
+			// code so I can put in this hacky section which fixes specific scripts
+			if(stageID == 14) { // Mimiga Village Shack -- Balrog busts throug door
+				if(args[2] == 80 || args[2] == 81 || args[2] == 82) args[2] += 32;
+				else args[2] += 19;
+			} else if(stageTileset == 25) { // Throne Room / Ostep
+				if(args[2] == 18) args[2] = 49;
+				if(args[2] == 21) args[2] = 50;
+			} else if(stageTileset == 27) { // King's Table
+				if(args[2] == 18) args[2] = 40;
+				if(args[2] == 21) args[2] = 41;
+			} else if(stageTileset == 28) { // Black Space
+				if(args[2] == 18) args[2] = 33;
+				if(args[2] == 21) args[2] = 34;
+			}
+			// Puff of smoke
 			stage_replace_block(args[0], args[1], args[2]);
-			sound_play(SOUND_BREAK, 5);
-			break;
-		case CMD_MP_ADD: // TODO: Map flag (1)
+			effect_create_smoke(block_to_pixel(args[0]) + 8, block_to_pixel(args[1]) + 8);
+		}
+		break;
+		// Map flags are unused but exist, keeping them here just in case
+		case CMD_MP_ADD: // Map flag (1)
 			args[0] = tsc_read_word();
 			break;
-		case CMD_MPJ: // TODO: If map flag (1) set jump to event (2)
+		case CMD_MPJ: // If map flag (1) set jump to event (2)
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			break;
-		case CMD_CRE: // TODO: Show credits
-			break;
-		case CMD_SIL: // TODO: Show illustration (1) in the credits
+		case CMD_CRE: // Show credits
+		{
+			return 5;
+		}
+		break;
+		case CMD_SIL: // Show illustration (1) in the credits
+		{
 			args[0] = tsc_read_word();
-			break;
-		case CMD_CIL: // TODO: Clear illustration in the credits
-			break;
+			credits_show_image(args[0]);
+		}
+		break;
+		case CMD_CIL: // Clear illustration in the credits
+		{
+			credits_clear_image();
+		}
+		break;
 		case CMD_SLP: // Show the teleporter menu
+		{
 			tsc_show_teleport_menu();
 			return 1;
+		}
+		break;
 		case CMD_PS_ADD: // Set teleporter slot (1) to event (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
 			if(args[0] < 8) teleportEvent[args[0]] = args[1];
-			break;
+		}
+		break;
 		case CMD_SVP: // Save
+		{
 			system_save();
-			break;
-		case CMD_STC: // TODO: Save counter
-			break;
-		case CMD_XX1: // TODO: Island effect
+		}
+		break;
+		case CMD_STC: // Save counter
+		{
+			system_save_counter(system_counter_ticks());
+		}
+		break;
+		case CMD_XX1: // Island effect
+		{
 			args[0] = tsc_read_word();
-			break;
-		case CMD_SMP:
+			
+			VDP_setEnable(FALSE);
+			// Disable camera
+			camera.target = NULL;
+			camera.x = SCREEN_HALF_W << CSF;
+			camera.y = SCREEN_HALF_H << CSF;
+			camera.x_shifted = 0;
+			camera.y_shifted = 0;
+			// Reset plane positions
+			VDP_setHorizontalScroll(PLAN_A, 0);
+			VDP_setVerticalScroll(PLAN_A, 0);
+			VDP_setHorizontalScroll(PLAN_B, 0);
+			VDP_setVerticalScroll(PLAN_B, 0);
+			// Clear planes
+			VDP_clearPlan(PLAN_B, TRUE);
+			VDP_clearPlan(PLAN_A, TRUE);
+			// Background sky/mountains
+			VDP_loadTileSet(&TS_XXBack, TILE_TSINDEX, TRUE);
+			VDP_fillTileMapRectInc(PLAN_B, 
+					TILE_ATTR_FULL(PAL3,0,0,0,TILE_TSINDEX), 10, 10, 20, 10);
+			// Foreground trees
+			VDP_loadTileSet(&TS_XXFore, TILE_BACKINDEX, TRUE);
+			VDP_fillTileMapRectInc(PLAN_A, 
+					TILE_ATTR_FULL(PAL3,1,0,0,TILE_BACKINDEX), 10, 16, 20, 4);
+			// Draw high prio black tiles over the top to hide island
+			static const uint32_t blackTile[8] = { 
+				0x11111111,0x11111111,0x11111111,0x11111111,
+				0x11111111,0x11111111,0x11111111,0x11111111
+			};
+			VDP_loadTileData(blackTile, 1, 1, FALSE);
+			VDP_fillTileMapRect(PLAN_A, 
+					TILE_ATTR_FULL(PAL0,1,0,0,1), 10, 6, 20, 4);
+			
+			// Island sprite
+			SHEET_LOAD(&SPR_XXIsland, 1, 15, TILE_HUDINDEX, 1, 0,0);
+			VDPSprite island[2] = {
+				(VDPSprite) { 
+					.x = 160 - 20 + 128, .y = 64 - 8 + 128, .size = SPRITE_SIZE(4, 3),
+					.attribut = TILE_ATTR_FULL(PAL3,0,0,0,TILE_HUDINDEX)
+				},
+				(VDPSprite) {
+					.x = 160 + 12 + 128, .y = 64 - 8 + 128, .size = SPRITE_SIZE(1, 3),
+					.attribut = TILE_ATTR_FULL(PAL3,0,0,0,TILE_HUDINDEX+12)
+				}
+			};
+			
+			VDP_setCachedPalette(PAL3, PAL_XX.data);
+			VDP_setPalette(PAL3, PAL_XX.data);
+			VDP_setEnable(TRUE);
+			
+			uint16_t t = TIME(350);
+			while(--t) {
+				if(t > TIME(200) || !args[0]) {
+					if((t % TIME(5)) == 0) {
+						island[0].y++;
+						island[1].y++;
+					}
+				}
+				sprite_addq(island, 2);
+				vsync();
+				sprites_send();
+			}
+		}
+		break;
+		case CMD_SMP: // Subtract 1 from tile index at position (1), (2)
+		{
 			args[0] = tsc_read_word();
 			args[1] = tsc_read_word();
-			break;
-		default:
-			break;
+			uint8_t b = stage_get_block(args[0], args[1]);
+			if (b > 0) stage_replace_block(args[0], args[1], b - 1);
 		}
-	} else if(window_is_open()) {
-		if(window_tick()) {
-			window_draw_char(cmd);
-		} else {
-			curCommand -= 1;
-			return 1;
+		break;
+		default: break;
+		}
+	} else {
+		uint16_t kanji = 0;
+		uint8_t doublebyte = FALSE;
+		if(cmd >= 0xE0 && cmd < 0xFF) {
+			doublebyte = TRUE;
+			if(cfg_language) { // Get kanji index from cmd and next byte
+				kanji = (cmd - 0xE0) * 0x60 + (tsc_read_byte() - 0x20);
+			} else {
+				tsc_read_byte();
+				cmd = '?';
+			}
+		}
+		if(window_is_open()) {
+			if(cfg_language && cmd == '\n' && linesSinceLastNOD > 1) {
+				tscState = TSC_WAITINPUT;
+				linesSinceLastNOD = 0;
+				curCommand--;
+				return 1;
+			}
+			if(window_tick() || (cfg_ffwd && (joystate & btn[cfg_btn_ffwd]))) {
+				if(cfg_language) {
+					window_draw_jchar(doublebyte, doublebyte ? kanji : cmd);
+				} else {
+					window_draw_char(cmd);
+				}
+			} else {
+				curCommand -= doublebyte ? 2 : 1;
+				return 1;
+			}
 		}
 	}
 	return 0;
 }
 
-u8 tsc_read_byte() {
-	u8 byte = curCommand[0];
+uint8_t tsc_read_byte() {
+	uint8_t byte = curCommand[0];
 	curCommand++;
 	return byte;
 }
 
-u16 tsc_read_word() {
-	u16 word = curCommand[0]+(curCommand[1]<<8);
+uint16_t tsc_read_word() {
+	uint16_t word = curCommand[0]+(curCommand[1]<<8);
 	curCommand += 2;
 	return word;
 }

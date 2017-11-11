@@ -1,108 +1,100 @@
-CC = m68k-elf-gcc
-AS = m68k-elf-as
-OBJC = m68k-elf-objcopy
-LD = m68k-elf-ld
-RM = rm -f
-ASMZ80 = zasm
-BINTOS = bintos
-PCMTORAW = pcmtoraw
-WAVTORAW = wavtoraw
-NM = nm
-NM2WCH = nm2wch
-SIZEBND = sizebnd
-MKISOFS = mkisofs
-RESCOMP= rescomp
+GENDEV?=/opt/toolchains/gen
+GENGCC_BIN=$(GENDEV)/m68k-elf/bin/m68k-elf-
+GENBIN=$(GENDEV)/bin
 
-SCD_LOADER = scd/LukeProjectCD
+CC = $(GENGCC_BIN)gcc
+AS = $(GENGCC_BIN)as
+LD = $(GENGCC_BIN)ld
+NM = $(GENGCC_BIN)nm
+OBJC = $(GENGCC_BIN)objcopy
+ASMZ80= bin/sjasm
+BINTOS= bin/bintos
+RESCOMP= bin/rescomp
+XGMTOOL= bin/xgmtool
+WAVTORAW= bin/wavtoraw
 
-OPTION =
-INCS = -I. -I$(GENDEV)/m68k-elf/include -I$(GENDEV)/m68k-elf/m68k-elf/include -Isrc -Ires -Iinc
-CCFLAGS = $(OPTION) -m68000 -Wall -O2 -std=gnu99 -c -fomit-frame-pointer
-HWCCFLAGS = $(OPTION) -m68000 -Wall -O1 -c -fomit-frame-pointer
-Z80FLAGS = -vb2
+GCC_VER := $(shell gcc -dumpversion)
+GENGCC_VER := $(shell $(CC) -dumpversion)
+
+PLUGIN=$(GENDEV)/m68k-elf/libexec/gcc/m68k-elf/$(GENGCC_VER)
+
+INCS = -Isrc -Ires -Iinc
+CCFLAGS = -m68000 -Wall -Wextra -std=c99 -c -fno-builtin -fshort-enums
+OPTIONS = 
 ASFLAGS = -m68000 --register-prefix-optional
-#LIBS =  -L$(GENDEV)/m68k-elf/lib -L$(GENDEV)/m68k-elf/lib/gcc/m68k-elf/4.8.2 -L$(GENDEV)/m68k-elf/m68k-elf/lib -lmd -lc -lgcc -lnosys -lm 
-LIBS =  -L$(GENDEV)/m68k-elf/lib -L$(GENDEV)/m68k-elf/lib/gcc/m68k-elf/* -L$(GENDEV)/m68k-elf/m68k-elf/lib -lmd -lnosys -lgcc 
-LINKFLAGS = -T $(GENDEV)/ldscripts/sgdk.ld -nostdlib 
-SCDLINKFLAGS = -T scd/mdcd.ld -nostdlib 
-ARCHIVES = $(GENDEV)/m68k-elf/lib/libmd.a $(GENDEV)/m68k-elf/lib/gcc/m68k-elf/*/libgcc.a 
+LIBS = -L$(GENDEV)/m68k-elf/m68k-elf/lib -lgcc
+LINKFLAGS = -T $(GENDEV)/ldscripts/sgdk.ld -nostdlib
+ARCHIVES = $(GENDEV)/m68k-elf/lib/gcc/m68k-elf/$(GENGCC_VER)/libgcc.a 
+FLAGSZ80 = -isrc/xgm
 
-RESOURCES=
-BOOT_RESOURCES=
+BOOTSS=$(wildcard src/boot/*.s)
+BOOT_RESOURCES=$(BOOTSS:.s=.o)
 
-BOOTSS=$(wildcard boot/*.s)
-BOOTSS+=$(wildcard src/boot/*.s)
-BOOT_RESOURCES+=$(BOOTSS:.s=.o)
-
-SCDBOOTSS=$(wildcard scd/*.s)
-SCDBOOTSS+=$(wildcard src/scd/*.s)
-SCDBOOT_RESOURCES=$(SCDBOOTSS:.s=.o)
-
-#BMPS=$(wildcard res/*.bmp)
-#VGMS=$(wildcard res/*.vgm)
-#RAWS=$(wildcard res/*.raw)
-#PCMS=$(wildcard res/*.pcm)
-#MVSS=$(wildcard res/*.mvs)
-#TFDS=$(wildcard res/*.tfd)
-#WAVS=$(wildcard res/*.wav)
-RESS=$(wildcard res/*.res)
-#WAVPCMS=$(wildcard res/*.wavpcm)
-#BMPS+=$(wildcard *.bmp)
-#VGMS+=$(wildcard *.vgm)
-#RAWS+=$(wildcard *.raw)
-#PCMS+=$(wildcard *.pcm)
-#MVSS+=$(wildcard *.mvs)
-#TFDS+=$(wildcard *.tfd)
-#WAVS+=$(wildcard *.wav)
-RESS+=$(wildcard *.res)
-#WAVPCMS+=$(wildcard *.wavpcm)
-
-#RESOURCES+=$(BMPS:.bmp=.o)
-#RESOURCES+=$(VGMS:.vgm=.o)
-#RESOURCES+=$(RAWS:.raw=.o)
-#RESOURCES+=$(PCMS:.pcm=.o)
-#RESOURCES+=$(MVSS:.mvs=.o)
-#RESOURCES+=$(TFDS:.tfd=.o)
-#RESOURCES+=$(WAVS:.wav=.o)
-#RESOURCES+=$(WAVPCMS:.wavpcm=.o)
-RESOURCES+=$(RESS:.res=.o)
-
+RESS=res/resources.res
+Z80S=$(wildcard src/xgm/*.s80)
 CS=$(wildcard src/*.c)
+CS+=$(wildcard src/ai/*.c)
+CS+=$(wildcard src/db/*.c)
+CS+=$(wildcard src/xgm/*.c)
 SS=$(wildcard src/*.s)
-S80S=$(wildcard src/*.s80)
-CS+=$(wildcard *.c)
-SS+=$(wildcard *.s)
-S80S+=$(wildcard *.s80)
+SS+=$(wildcard src/xgm/*.s)
+RESOURCES=$(RESS:.res=.o)
+RESOURCES+=$(Z80S:.s80=.o)
 RESOURCES+=$(CS:.c=.o)
 RESOURCES+=$(SS:.s=.o)
-RESOURCES+=$(S80S:.s80=.o)
 
 OBJS = $(RESOURCES)
 
-all: out.bin 
+.SECONDARY: doukutsu.elf
 
-src/boot/sega.o: out/rom_head.bin
+.PHONY: all ntsc ntsc-debug ntsc-profile pal pal-debug pal-profile
+
+all: ntsc
+
+ntsc: release
+ntsc-profile: profile
+ntsc-debug: debug
+
+pal: CCFLAGS += -DPAL
+pal: release
+pal-profile: CCFLAGS += -DPAL
+pal-profile: profile
+pal-debug: CCFLAGS += -DPAL
+pal-debug: debug
+
+.PHONY: release profile debug main-build head-gen tools
+
+release: OPTIONS = -O3 -fno-web -fno-gcse -fno-unit-at-a-time -flto -fuse-linker-plugin
+#release: LINKFLAGS += -s
+release: main-build symbol.txt
+
+profile: OPTIONS = -O3 -fno-web -fno-gcse -fno-unit-at-a-time -flto -fuse-linker-plugin
+profile: OPTIONS += -fno-omit-frame-pointer
+profile: main-build symbol.txt
+
+# Gens-KMod, BlastEm and UMDK support GDB tracing, enabled by this target
+debug: OPTIONS = -g -O2 -DDEBUG -DKDEBUG
+debug: main-build symbol.txt
+
+main-build: sgdk-tools head-gen doukutsu.bin
+
+.PHONY: tarsaves saves
+# This will generate a big folder of SRAM data based on Profile.dat saves on cavestory.org
+tarsaves: prof2sram
+tarsaves:
+	python2 savegen.py
+	tar czvf saves.tar.gz save
+saves: prof2sram
+saves:
+	python2 savegen.py
+	zip -r saves.zip save
+
+# Cross reference symbol.txt with the addresses displayed in the crash handler
+symbol.txt: doukutsu.bin
+	$(NM) --plugin=$(PLUGIN)/liblto_plugin.so -n doukutsu.elf > symbol.txt
+
+src/boot/sega.o: src/boot/rom_head.bin
 	$(AS) $(ASFLAGS) src/boot/sega.s -o $@
-
-scd/segacd.o: 
-	$(AS) $(ASFLAGS) scd/segacd.s -o $@
-
-
-out.iso: out.elf_scd
-	#
-	# Create a sega cd image.  Limited to 256K or smaller Roms
-	#
-	$(NM) -n -S -t x out.elf_scd > out.nm
-	$(OBJC) -O binary out.elf_scd out.bin
-	$(SIZEBND) out.bin -sizealign 131072   
-	$(OBJC) -O binary out.elf_scd $(SCD_LOADER)/_filesystem/M_INIT.PRG
-	$(SIZEBND) $(SCD_LOADER)/_filesystem/M_INIT.PRG -sizealign 131072    
-	$(MKISOFS) -iso-level 1 -o $(SCD_LOADER)/filesystem.img -pad $(SCD_LOADER)/_filesystem
-	tail -c +32769 $(SCD_LOADER)/filesystem.img > $(SCD_LOADER)/filesystem.bin
-	$(RM) -f $(SCD_LOADER)/filesystem.img
-	cd $(SCD_LOADER) && $(AS) $(ASFLAGS) -M -ahlsm=listing.asm  main-us-as.asm -o out.iso
-	tail -c +53 $(SCD_LOADER)/out.iso > out.iso
-	$(RM) -f $(SCD_LOADER)/filesystem.bin
 
 %.bin: %.elf
 	$(OBJC) -O binary $< temp.bin
@@ -111,72 +103,87 @@ out.iso: out.elf_scd
 %.elf: $(OBJS) $(BOOT_RESOURCES)
 	$(CC) -o $@ $(LINKFLAGS) $(BOOT_RESOURCES) $(ARCHIVES) $(OBJS) $(LIBS)
 
-%.elf_scd: $(OBJS) $(SCDBOOT_RESOURCES)
-	$(CC) -o $@ $(SCDLINKFLAGS) $(SCDBOOT_RESOURCES) $(ARCHIVES) $(OBJS) $(LIBS)
-
-%.o80: %.s80
-	$(ASMZ80) $(Z80FLAGS) -o $@ $<
-
-%.c: %.o80
-	$(BINTOS) $<
-
 %.o: %.c
-	$(CC) $(CCFLAGS) $(INCS) -c $< -o $@
+	@echo "CC $<"
+	@$(CC) $(CCFLAGS) $(OPTIONS) $(INCS) -c $< -o $@
 
 %.o: %.s 
-	$(AS) $(ASFLAGS) $< -o $@
-
-%.s: %.bmp
-	bintos -bmp $<
-
-%.rawpcm: %.pcm
-	$(PCMTORAW) $< $@
-
-%.raw: %.wav
-	$(WAVTORAW) $< $@ 16000
-
-%.pcm: %.wavpcm
-	$(WAVTORAW) $< $@ 22050
-
-#%.tfc: %.tfd
-#	$(TFMCOM) $<
-
-#%.o80: %.s80
-#	$(ASMZ80) $(FLAGSZ80) $< $@ out.lst
-
-%.s: %.tfd
-	$(BINTOS) -align 32768 $<
-
-%.s: %.mvs
-	$(BINTOS) -align 256 $<
-
-%.s: %.esf
-	$(BINTOS) -align 32768 $<
-
-%.s: %.eif
-	$(BINTOS) -align 256 $<
-
-%.s: %.vgm 
-	$(BINTOS) -align 256 $<
-
-%.s: %.raw
-	$(BINTOS) -align 256 -sizealign 256 $<
-
-%.s: %.rawpcm
-	$(BINTOS) -align 128 -sizealign 128 -nullfill 136 $<
-
-%.s: %.rawpcm
-	$(BINTOS) -align 128 -sizealign 128 -nullfill 136 $<
+	@echo "AS $<"
+	@$(AS) $(ASFLAGS) $< -o $@
 
 %.s: %.res
 	$(RESCOMP) $< $@
 
-out/rom_head.bin: src/boot/rom_head.o
-	mkdir -p out/boot
+%.o80: %.s80
+	$(ASMZ80) $(FLAGSZ80) $< $@ out.lst
+
+%.s: %.o80
+	$(BINTOS) $<
+
+src/boot/rom_head.o: src/boot/rom_head.c
+	$(CC) $(CCFLAGS) -o $@ $<
+
+src/boot/rom_head.bin: src/boot/rom_head.o
 	$(LD) $(LINKFLAGS) --oformat binary -o $@ $<
-	
+
+head-gen:
+	rm -f inc/ai_gen.h
+	python aigen.py
+
+
+.PHONY: tools sgdk-tools
+# CSMD TOOLS
+
+tools: prof2sram
+
+tscomp:
+	gcc tools/tscomp/tscomp.c -o tscomp -std=c99
+
+tileopt:
+	gcc tools/tileopt/tileopt.c -lSDL2 -lSDL2_image -o tileopt -std=c99
+
+lutgen:
+	gcc tools/lutgen/lutgen.c -lm -o lutgen -std=c99
+
+prof2sram:
+	gcc tools/prof2sram/prof2sram.c -o prof2sram -std=c99
+
+savetrim:
+	gcc tools/savetrim/savetrim.c -o savetrim -std=c99
+
+# SGDK TOOLS
+
+sgdk-tools: $(ASMZ80) $(RESCOMP) $(BINTOS) $(XGMTOOL) $(WAVTORAW)
+
+$(ASMZ80):
+	make -C tools/sjasm
+	cp -f tools/sjasm/sjasm $(ASMZ80)
+
+# gnu99 to remove warnings about strdup()
+$(RESCOMP):
+	gcc $(wildcard tools/rescomp/*.c) -Itools/rescomp -o $(RESCOMP) -std=gnu99
+
+$(XGMTOOL):
+	gcc $(wildcard tools/xgmtool/*.c) -Itools/xgmtool -lm -o $(XGMTOOL) -std=c99
+
+$(BINTOS):
+	gcc tools/bintos/bintos.c -o $(BINTOS) -std=c99
+
+$(WAVTORAW):
+	gcc tools/wavtoraw/wavtoraw.c -lm -o $(WAVTORAW) -std=c99
+
+
+.PHONY: clean super-clean
 
 clean:
-	$(RM) $(RESOURCES)
-	$(RM) *.o *.bin *.elf *.elf_scd *.map *.iso
-	$(RM) src/boot/*.o src/boot/*.bin
+	rm -f $(RESOURCES)
+	rm -f doukutsu.bin doukutsu.elf temp.bin symbol.txt
+	rm -f src/boot/sega.o src/boot/rom_head.o src/boot/rom_head.bin
+	rm -f src/xgm/z80_xgm.s src/xgm/z80_xgm.o80 src/xgm/z80_xgm.h out.lst
+	rm -f res/resources.h res/resources.s
+	rm -f inc/ai_gen.h
+
+super-clean: clean
+	rm -f saves.zip saves.tar.gz
+	rm -f prof2sram tileopt tscomp lutgen savetrim
+	rm -f $(ASMZ80) $(RESCOMP) $(BINTOS) $(XGMTOOL) $(WAVTORAW)

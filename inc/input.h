@@ -1,16 +1,14 @@
-#ifndef INC_INPUT_H_
-#define INC_INPUT_H_
+#define joy_pressed(b) (((joystate&(b))&&((~oldstate)&(b))))
+#define joy_released(b) ((((~joystate)&(b))&&(oldstate&(b))))
+#define joy_down(b) ((joystate&(b)))
 
-#include "common.h"
+#define input_update() {                                                                       \
+	oldstate = joystate;                                                                       \
+	joystate = JOY_readJoypad(JOY_1);                                                          \
+}
 
-// Ay yo here a bunch of parentheses thanks eclipse
-#define joy_pressed(b) (((joystate&b)&&((~oldstate)&b)))
-#define joy_released(b) ((((~joystate)&b)&&(oldstate&b)))
-#define joy_down(b) ((joystate&b))
+// Current and previous states, so the moment a button is pressed or released can be detected
+volatile uint16_t joystate, oldstate;
 
-u16 joystate, oldstate;
-
+// Just sets the 2 states to 0
 void input_init();
-void input_update();
-
-#endif // INC_INPUT_H_

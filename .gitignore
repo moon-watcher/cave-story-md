@@ -1,6 +1,11 @@
-/out
-.project
-.cproject
-.settings/
+doukutsu.bin
+doukutsu.elf
 res/resources.h
-*.exe
+inc/ai_gen.h
+temp.bin
+symbol.txt
+*.o
+savegen_cache/
+bin/
+out.lst
+src/boot/rom_head.bin

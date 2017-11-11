@@ -1,80 +1,66 @@
-#ifndef INC_STAGE_H_
-#define INC_STAGE_H_
-
-#include <genesis.h>
-#include "common.h"
-
-// "Stage" refers to a level map. SGDK has a "Map" structure that is not used here,
-// so stage was chosen to avoid conflict
-// "Block" here refers to 16x16 in-game tiles. It is named this way to differentiate
-// it from the 8x8 tiles used to store graphical data in VDP
-
 /*
- * Cave Story file types related to stage data
- *
- * PXM - Level layout
- * 0x00 "PXM"
- * 0x03 Unknown byte
- * 0x04 Width
- * 0x06 Height
- * From 0x08 on each byte is 1 tile placement
- * Left to right, top to bottom
- *
- * PXE - Entity data
- * Header is 8 bytes
- * 0x00: "PXE" then nullchar
- * 0x04: Number of entities
- * 0x06: Unknown
- * Then for each entity (12 bytes each)
- * 0x08 + E*12: x position (blocks)
- * 0x0A + E*12: y position
- * 0x0C + E*12: ID
- * 0x0E + E*12: Event # (in the TSC)
- * 0x10 + E*12: NPC type (index in npc.tbl, or in our case npc_info in tables.c)
- * 0x12 + E*12: Entity flags (see tables.h)
+ * "Stage" refers to a level map. SGDK has a "Map" structure that is not used here,
+ * so stage was chosen to avoid conflict
+ * "Block" refers to 16x16 in-game tiles. It is named this way to differentiate
+ * it from the 8x8 tiles used to store graphical data in VDP
  */
 
-#define BLOCK_SOLID 0x1
-#define BLOCK_DAMAGE 0x2
-#define BLOCK_SPECIAL 0x3
-#define BLOCK_NPCSOLID 0x4
-#define BLOCK_BULLETPASS 0x5
-#define BLOCK_PLAYERSOLID 0x6
+#define BLOCK_SIZE 16
 
-#define BLOCK_SLOPE 0x10
-#define BLOCK_WATER 0x20
-#define BLOCK_FOREGROUND 0x40
-#define BLOCK_WIND 0x80
+// Tile attributes (PXA)
+// High nybble: flags that can be used in combination
+#define BLOCK_SLOPE			0x10
+#define BLOCK_WATER			0x20
+#define BLOCK_FOREGROUND	0x40
+#define BLOCK_WIND			0x80
+// Low nybble: distinct values
+// These are the values for normal tiles, they don't apply to SLOPE or WIND
+// For SLOPE values, check the heightmap in entity.h
+// WIND values are directions, see the enum in common.h
+#define BLOCK_SOLID			0x1
+#define BLOCK_DAMAGE		0x2
+#define BLOCK_SPECIAL		0x3
+#define BLOCK_NPCSOLID		0x4
+#define BLOCK_BULLETPASS	0x5
+#define BLOCK_PLAYERSOLID	0x6
 
 // Helper macros
-#define stage_get_block(x, y) (stageBlocks[(y) * stageWidth + (x)])
-#define stage_get_block_type(x, y) (stageTileFlags[(x)%32][(y)%32])
+// This will get the block (in the tileset) that is at a specific location in the stage grid
+#define stage_get_block(x, y) (stageBlocks[stageTable[y] + (x)])
+// Like above, but will return the attributes (solid, water, damage, etc)
+#define stage_get_block_type(x, y) (tileset_info[stageTileset].PXA[stage_get_block(x, y)])
+// Shortcut version of above
+#define blk(xf, xoff, yf, yoff)                                                                \
+	stage_get_block_type((((xf)>>CSF)+(xoff))>>4,(((yf)>>CSF)+(yoff))>>4)
 
-u16 stageID; // Index of current stage in stage_info
-u16 stageWidth, stageHeight; // Width and height measured in blocks
-u8 stageBackgroundType; // Which effect to use to display the background
-u8 *stageBlocks; // Pointer to level layout data on ROM
-u8 stageTileset;
-// Cached tile flags in a 512x512 area around the player
-// Used to speed up collision detection
-u8 stageTileFlags[32][32];
-u8 stageEntityCount; // Used for debug mainly
+// Index of current stage in db/stage.c
+uint16_t stageID;
+// Size of the stage - how many blocks wide/high
+uint16_t stageWidth, stageHeight;
+// A multiplication lookup table for each row of stageBlocks
+// Removes all mulu.w and __mulsi3 instructions in entity stage collision
+extern uint16_t *stageTable;
+// Copy of level layout data loaded into RAM
+// This takes up extra space, but there are times where scripts make modifications to the
+// level layout (allowing player to reach some areas) so it is necessary to do this
+extern uint8_t *stageBlocks;
+// Which tileset (db/tileset.c) is used by the current stage
+uint8_t stageTileset;
+// Prepares to draw off-screen tiles when stage_update() is later called
+// Camera calls this each time it scrolls past 1 block length (16 pixels)
+int8_t morphingRow, morphingColumn;
 
-// Clears previous stage and switches to one with the given ID, which is
-// indexed in the stage_info table
-void stage_load(u16 id);
+extern uint8_t stageBackground;
+uint16_t backScrollTimer;
+uint8_t stageBackgroundType;
 
-bool stage_get_block_solid(u16 x, u16 y, bool checkNpcSolid);
-
-void stage_replace_block(u16 bx, u16 by, u8 index);
+// Clears previous stage and switches to one with the given ID
+void stage_load(uint16_t id);
+void stage_load_credits(uint8_t id);
+// Called by TSC, replaces one block with another and creates smoke
+void stage_replace_block(uint16_t bx, uint16_t by, uint8_t index);
 // Updates scrolling for the stage and draws blocks as they get near the screen
 // It is ideal to call this during vblank
 void stage_update();
-// Updates the stageTileFlags "cache" array and prepares to draw off-screen
-// tiles when stage_update() is later called
-// Camera uses this
-void stage_morph(s16 _x, s16 _y, s8 x_dir, s8 y_dir);
-// Immediately draws a rectangular area of the stage
-void stage_draw_area(u16 _x, u16 _y, u8 _w, u8 _h);
-
-#endif
+// Immediately draws a rectangular area of the stage (slow)
+//void stage_draw_area(uint16_t _x, uint16_t _y, uint8_t _w, uint8_t _h);

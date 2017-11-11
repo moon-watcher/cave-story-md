@@ -1,6 +1,6 @@
 /*
- * An attempt to rewrite/port Cave Story's engine to an old console
- * Copyright (C) 2015 aderosier
+ * A "demake" of Cave Story for the Sega Mega Drive
+ * Copyright (C) 2017 Andy Grind
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,41 +14,75 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * The above applies to the code only and not any of the art assets.
- * See credits.txt for detailed information
  */
 
-#include <genesis.h>
+#include "common.h"
 
 #include "audio.h"
-#include "sprite.h"
-#include "common.h"
-#include "resources.h"
-#include "titlescreen.h"
-#include "soundtest.h"
-#include "game.h"
+#include "dma.h"
+#include "effect.h"
+#include "gamemode.h"
 #include "input.h"
-#include "credits.h"
+#include "joy.h"
+#include "resources.h"
+#include "sprite.h"
+#include "stage.h"
+#include "system.h"
+#include "tools.h"
+#include "tsc.h"
+#include "vdp.h"
+#include "vdp_pal.h"
+#include "vdp_tile.h"
+#include "xgm.h"
+#include "z80_ctrl.h"
+
+void vsync() {
+	vblank = 0;
+	while(!vblank);
+	vblank = 0;
+}
+
+void aftervsync() {
+	XGM_doVBlankProcess();
+	XGM_set68KBUSProtection(TRUE);
+	waitSubTick(10);
+	
+	DMA_flushQueue();
+	
+	if(fading_cnt > 0) VDP_doStepFading(FALSE);
+	
+	dqueued = FALSE;
+	if(ready) {
+		if(inFade) { spr_num = 0; }
+		else { sprites_send(); }
+		ready = FALSE;
+	}
+	if(gamemode == GM_GAME) stage_update(); // Scrolling
+	
+	XGM_set68KBUSProtection(FALSE);
+	
+	JOY_update();
+}
 
 int main() {
-    VDP_init();
-    VDP_setPlanSize(64, 32);
-    // Sprite list overlaps the bottom of the window, so move it up
-	VDP_setSpriteListAddress(0xB600); // Default: 0xBC00
-	VDP_setHScrollTableAddress(0xF800);
-	sprites_init();
+	puts("Hi June");
     sound_init();
 	input_init();
-    while(true) {
-		u8 select = titlescreen_main();
-		switch(select) {
-			case 0:
-			case 1:
-				select = game_main(select);
-				if(select > 0) credits_main(select);
-				break;
-			case 2: soundtest_main(); break;
+    while(TRUE) {
+		splash_main();
+		uint8_t select = titlescreen_main();
+		if(select == 0) {
+			select = saveselect_main();
+			if(select >= 4) continue;
+			game_main(select);
+			credits_main();
+		} else if(select == 2) {
+			soundtest_main(); continue;
+		} else if(select == 3) {
+			config_main(); continue;
+		} else {
+			game_main(select);
+			credits_main();
 		}
     }
 	return 0;
